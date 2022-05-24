@@ -161,8 +161,8 @@ def constant_expression(expression, constants):
     """
 
     #If expression is a FloatLiteral, an int or in the list of constants, it is constant
-    if (isinstance(expression, FloatLiteral) or 
-        isinstance(expression, IntLiteral) or 
+    if (isinstance(expression, FloatLiteral) or
+        isinstance(expression, IntLiteral) or
         isinstance(expression, int) or expression in constants):
         return True
 
@@ -246,7 +246,7 @@ def parametrize(routine):
             if all(dims):
 
                 #Check that the array appears the same number of times as the size, delete if not
-                if (len(instances) != c.shape[0].value or 
+                if (len(instances) != c.shape[0].value or
                     not all(isinstance(d[0], IntLiteral) for d in dims)):
                     delete.update(instances)
 
@@ -744,7 +744,7 @@ def reorder_arrays(driver, kernels):
     driver.spec = SubstituteExpressions(vmap).visit(driver.spec)
 
     #List variables in driver body in shuffleargs that use dimensions
-    bvars = [v for v in FindVariables(unique=False).visit(driver.body) 
+    bvars = [v for v in FindVariables(unique=False).visit(driver.body)
              if v.name in shuffleargs and v.dimensions]
 
     #Generate map to variables with reordered dimensions
@@ -852,7 +852,7 @@ def demote_arguments(driver, kernel, dimension):
             #corresponding to  the size of dimensions
             new_shape = []
             new_dims  = []
-        
+
             #Loop over shape and dimension
             dims = []
             for i, s in enumerate(a.shape):
@@ -925,7 +925,7 @@ def demote_arguments(driver, kernel, dimension):
             new_dims = as_tuple(new_dims) or None
             cmap[a] = a.clone(dimensions = new_dims)
 
-        
+
     #Transform kernel spec and body and driver
     kernel.spec = SubstituteExpressions(amap).visit(kernel.spec)
     kernel.body = SubstituteExpressions(vmap).visit(kernel.body)
@@ -941,11 +941,11 @@ def demote_variables(routine, dimension):
     """
 
     #List array variables with dimension in shape that are not arguments
-    variables = [v for v in routine.variables if isinstance(v, Array) and 
+    variables = [v for v in routine.variables if isinstance(v, Array) and
                  any(d in dimension.size_expressions for d in v.shape) and
                  v not in routine.arguments]
 
-    #Construct maps to the variables to their new versions 
+    #Construct maps to the variables to their new versions
     #and keep a dict of indices removed.
     varmap = {}
     vmap = {}
@@ -1013,7 +1013,7 @@ def remove_index_arg(driver, kernel, index):
                 new_shape = v.shape[:imap[v.name]] + v.shape[imap[v.name]+1:]
                 new_shape = as_tuple(new_shape) or None
                 new_type = v.type.clone(shape=new_shape)
-                
+
                 new_dims = v.dimensions[:imap[v.name]] + v.dimensions[imap[v.name]+1:]
                 new_dims = as_tuple(new_dims) or None
 
@@ -1111,7 +1111,7 @@ def pass_undefined(driver, kernel):
 
     #List driver variables that appear in kernel, but are not listed in kernel variables
     undefined = (d for d in driver.variables if
-                 d.name in (k.name for k in FindVariables(unique=True).visit(kernel.body)) and 
+                 d.name in (k.name for k in FindVariables(unique=True).visit(kernel.body)) and
                  d.name not in (k.name for k in kernel.variables))
 
 
@@ -1225,8 +1225,6 @@ def hoist_fun(driver):
     kernels = driver.members
 
     mod = make_module(driver)
-    driver.contains=None
-#    kernels = [k.clone(parent=mod, symbol_attrs=k.symbol_attrs, rescope_symbols=True) for k in kernels]
 
     remove_associate(driver)
 
@@ -1255,6 +1253,8 @@ def hoist_fun(driver):
 
         parametrize(kernel)
 
+        kernel = kernel.clone(parent=None)
+
     reorder_arrays(driver, kernels)
 
     merge_loops(horizontal, driver.body)
@@ -1272,6 +1272,8 @@ def hoist_fun(driver):
 #    add_data(driver)
 
     remove_unused_variables(driver)
+
+    driver = driver.clone(contains=None)
 
     mod = mod.clone(contains = Section(body= (driver,) + tuple(kernels)))
 
