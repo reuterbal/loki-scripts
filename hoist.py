@@ -203,6 +203,7 @@ def parametrize(routine):
     #Initialize dictionary and tracker and fill dictionary with existing parameters
     const_dict = {}
     for v in routine.variables:
+        assert v.scope is routine
         if v.type.parameter and not isinstance(v, Array):
             const_dict[v] = v.type.initial
 
@@ -232,6 +233,8 @@ def parametrize(routine):
     delete = set()
     modify = set()
     for c in const_dict:
+
+#        assert c.scope is routine
 
         if isinstance(c, Array) and c not in delete and c not in modify:
 
@@ -327,10 +330,7 @@ def parametrize(routine):
     #Add new declarations
     for c in const_dict:
         new_type = c.type.clone(parameter=True, initial=const_dict[c])
-        new_c = c.clone(type = new_type)
-        print(new_c)
-        print(new_c.type)
-        print()
+        new_c = c.clone(type = new_type, scope = routine)
         routine.spec.append(VariableDeclaration(symbols=(new_c,)))
 
 
@@ -1230,6 +1230,8 @@ def hoist_fun(driver):
     driver = driver.clone(contains=None)
 
     mod = make_module(driver)
+
+    kernels = [k.clone(parent=mod, symbol_attrs=k.symbol_attrs, rescope_symbols=True) for k in kernels]
 
     remove_associate(driver)
 
