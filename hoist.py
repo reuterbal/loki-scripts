@@ -66,8 +66,7 @@ def remove_init_args(routine, variables):
     for declaration in declarations:
         for v in declaration.symbols:
             if v.type.initial:
-                expr_vars = FindVariables().visit(v.type.initial)
-                for ev in expr_vars:
+                for ev in FindVariables().visit(v.type.initial):
                     if ev in variables:
                         variables.remove(ev)
 
@@ -203,7 +202,6 @@ def parametrize(routine):
     #Initialize dictionary and tracker and fill dictionary with existing parameters
     const_dict = {}
     for v in routine.variables:
-        assert v.scope is routine
         if v.type.parameter and not isinstance(v, Array):
             const_dict[v] = v.type.initial
 
@@ -233,8 +231,6 @@ def parametrize(routine):
     delete = set()
     modify = set()
     for c in const_dict:
-
-#        assert c.scope is routine
 
         if isinstance(c, Array) and c not in delete and c not in modify:
 
@@ -330,7 +326,8 @@ def parametrize(routine):
     #Add new declarations
     for c in const_dict:
         new_type = c.type.clone(parameter=True, initial=const_dict[c])
-        new_c = c.clone(type = new_type, scope = routine)
+        new_c = c.clone(type = new_type)
+
         routine.spec.append(VariableDeclaration(symbols=(new_c,)))
 
 
@@ -367,7 +364,6 @@ def remove_associate(routine):
             associate_map[n] = SubstituteExpressions(vmap).visit(n.body)
 
     routine.body = Transformer(associate_map).visit(routine.body)
-
 
 
 def pass_value(routine):
@@ -1227,11 +1223,10 @@ def hoist_fun(driver):
 
     #Kernel is the subroutine contained in driver in this case.
     kernels = driver.members
-    driver = driver.clone(contains=None)
 
     mod = make_module(driver)
-
-    kernels = [k.clone(parent=mod, symbol_attrs=k.symbol_attrs, rescope_symbols=True) for k in kernels]
+    driver.contains=None
+#    kernels = [k.clone(parent=mod, symbol_attrs=k.symbol_attrs, rescope_symbols=True) for k in kernels]
 
     remove_associate(driver)
 
