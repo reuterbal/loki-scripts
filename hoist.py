@@ -7,7 +7,8 @@ from loki import FP, Sourcefile, Dimension, Subroutine, FindNodes, FindScopes, f
 from loki import Loop, Transformer, CaseInsensitiveDict, as_tuple, SubstituteExpressions
 from loki import FindVariables, Assignment, DeferredTypeSymbol, DerivedType
 from loki import Quotient, Product, Sum, InlineCall
-from loki import Scalar, Array, Import, VariableDeclaration, BasicType, LoopRange, RangeIndex, IntLiteral, Pragma, Node
+from loki import Scalar, Array, Import, VariableDeclaration, BasicType, LoopRange, RangeIndex
+from loki import IntLiteral, Pragma, Node
 from loki import FloatLiteral, IntLiteral, LogicLiteral, LiteralList
 from loki import CommentBlock, Comment, Module, Associate, Conditional, Section
 from loki.expression import symbols as sym
@@ -627,25 +628,42 @@ def add_seq(routines):
 
 
 def add_data(routine):
+    '''
+    Add data statements to routines
+    '''
 
     ivars = set()
     ovars = set()
 
-    loops = [l for l in routine.body.body if isinstance(l,Loop) and l.pragma]
+    loops = [l for l in FindNodes(Loop).visit(routine.body) if l.pragma]
 
+    loop_vars = set()
+
+    inside_loops = []
     for l in loops:
+
+        loop_vars.add(l.variable)
+
+        if l not in inside_loops:
+            inside_loops += [k for k in FindNodes(Loop).visit(l.body) if k.pragma]
+
+    red_loops = [l for l in loops if l not in inside_loops]
+
+    v_names = [v.name for v in routine.variables if v not in loop_vars]
+
+    for l in red_loops:
 
         assignments = FindNodes(Assignment).visit(l.body)
         for a in assignments:
 
-            if isinstance(a.lhs, Array):
+            if a.lhs.name in v_names and not a.lhs.type.parameter and (isinstance(a.lhs, Array) or isinstance(a.lhs.type.dtype, DerivedType)):
                 if a.lhs.parent:
                     ovars.add(a.lhs.parent)
                 else:
                     ovars.add(a.lhs.clone(dimensions=None))
 
             for v in FindVariables().visit(a.rhs):
-                if isinstance(v, Array):
+                if v.name in v_names and not v.type.parameter and (isinstance(v, Array) or isinstance(v.type.dtype, DerivedType)):
                     if v.parent:
                         ivars.add(v.parent)
                     else:
@@ -655,11 +673,7 @@ def add_data(routine):
         for c in calls:
             for a in c.context.arg_iter(c):
 
-                if isinstance(a[1],Array) or  isinstance(a[1].type.dtype, DerivedType):
-
-                    if a[1].name == 'PDM0I':
-                        x = a[1].clone(dimensions=None)
-                        print('call', x, x._symbol._scope)
+                if a[1].name in v_names and not a[1].type.parameter and (isinstance(a[1], Array) or isinstance(a[1].type.dtype, DerivedType)):
 
                     if (a[0].type.intent == 'inout' or a[0].type.intent == 'in' or a[0].type.value):
                         ivars.add(a[1].clone(dimensions=None))
@@ -670,6 +684,60 @@ def add_data(routine):
     iovars = ivars.intersection(ovars)
     ivars = ivars - iovars
     ovars = ovars - iovars
+
+    cvars = set()
+
+    for i in ivars:
+        if not (i.type.intent or i.type.value):
+            cvars.add(i)
+
+    for o in ovars:
+        if not (o.type.intent or o.type.value):
+            cvars.add(o)
+
+    for io in iovars:
+        if not (io.type.intent or io.type.value):
+            cvars.add(io)
+
+    iovars = iovars - cvars
+    ivars = ivars - cvars
+    ovars = ovars - cvars
+
+    content = "data "
+
+    if ovars:
+        out_content = 'copyout('
+        for o in ovars:
+            out_content += (o.name + ', ')
+        out_content = out_content[:-2] + ') '
+        content += out_content
+
+    if ivars:
+        in_content = 'copyin('
+        for i in ivars:
+            in_content += (i.name + ', ')
+        in_content = in_content[:-2] + ') '
+        content += in_content
+
+    if iovars:
+        inout_content = 'copy('
+        for io in iovars:
+            inout_content += (io.name + ', ')
+        inout_content = inout_content[:-2] + ') '
+        content += inout_content
+
+    if cvars:
+        c_content = 'create('
+        for c in cvars:
+            c_content += (c.name + ', ')
+        c_content = c_content[:-2] + ') '
+        content += c_content
+
+    data_pragma = Pragma(keyword = "acc", content = content)
+    end_pragma = Pragma(keyword = "acc", content = 'end data')
+
+    routine.spec.append(data_pragma)
+    routine.body.append(end_pragma)
 
 
 def reorder_arrays(driver, kernels):
@@ -1114,7 +1182,6 @@ def pass_undefined(driver, kernel):
                  d.name in (k.name for k in FindVariables(unique=True).visit(kernel.body)) and
                  d.name not in (k.name for k in kernel.variables))
 
-
     #Strip away any dimensions in array variables
     new_arguments = []
     shapevars = set()
@@ -1221,6 +1288,9 @@ def hoist_fun(driver):
     vertical = Dimension(name='vertical', size='klev+1', index='jlev', bounds=('0', 'klev'))
     gdim = Dimension(name='gdim', size='3', index='jg', bounds=('1', '3'))
 
+    vertical1 = Dimension(name='vertical1', size='klev+1', index='jlev1', bounds=('0', 'klev'))
+    vertical2 = Dimension(name='vertical2', size='klev+1', index='jlev2', bounds=('0', 'klev'))
+
     #Kernel is the subroutine contained in driver in this case.
     kernels = driver.members
 
@@ -1259,6 +1329,9 @@ def hoist_fun(driver):
 
     merge_loops(horizontal, driver.body)
 
+    reorder_loops(vertical2, horizontal, driver)
+    reorder_loops(vertical1, horizontal, driver)
+
     reorder_loops(gdim, vertical, driver)
     reorder_loops(gdim, horizontal, driver)
     reorder_loops(vertical, horizontal, driver)
@@ -1269,13 +1342,11 @@ def hoist_fun(driver):
 
     add_acc(driver, vector=horizontal, sequential=vertical)
 
-#    add_data(driver)
+    add_data(driver)
 
     remove_unused_variables(driver)
 
-    driver = driver.clone(contains=None)
-
-    mod = mod.clone(contains = Section(body= (driver,) + tuple(kernels)))
+    mod = mod.clone(contains = Section(body= (driver.clone(contains=None),) + tuple(kernels)))
 
     return mod
 
