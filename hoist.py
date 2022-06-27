@@ -759,12 +759,11 @@ def reorder_arrays(driver, kernels):
     for kernel in kernels:
         kcalls[kernel] = [call for call in calls if call.name == kernel.name]
 
-    var_list = []
+    shuffleargs = {}
 
     #Loop over kernels and the calls to the kernel
     for kernel in kcalls:
 
-        shuffleargs = {}
         for c in kcalls[kernel]:
 
             #a[0] is the variable in kernel
@@ -796,6 +795,7 @@ def reorder_arrays(driver, kernels):
 
                         #Store new_index and variable
                         shuffleargs[a[1].name] = new_index
+
 
     #List variables in showing up in shuffleargs
     dvars = [v for v in driver.variables if v.name in shuffleargs]
@@ -1327,14 +1327,16 @@ def hoist_fun(driver):
 
     reorder_arrays(driver, kernels)
 
+    reorder_loops(gdim, vertical, driver)
+    reorder_loops(gdim, horizontal, driver)
+
     merge_loops(horizontal, driver.body)
 
     reorder_loops(vertical2, horizontal, driver)
     reorder_loops(vertical1, horizontal, driver)
+    reorder_loops(vertical1, horizontal, driver)
 
-    reorder_loops(gdim, vertical, driver)
-    reorder_loops(gdim, horizontal, driver)
-    reorder_loops(vertical, horizontal, driver)
+    merge_loops(horizontal, driver.body)
 
     parametrize(driver)
 
