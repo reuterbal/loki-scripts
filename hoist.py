@@ -13,6 +13,9 @@ from loki import FloatLiteral, IntLiteral, LogicLiteral, LiteralList
 from loki import CommentBlock, Comment, Module, Associate, Conditional, Section
 from loki.expression import symbols as sym
 
+def is_comment(node):
+    return isinstance(node, Comment) or isinstance(node, CommentBlock)
+
 
 def expression_variables(expression):
     """
@@ -400,7 +403,7 @@ def find_next(loop, nodes):
             candidates = [n]
             candidates += find_next(n, nodes[i:])
             break
-        elif not (isinstance(n, Comment) or isinstance(n, CommentBlock)):
+        elif not is_comment(n,):
             break
         i += 1
 
@@ -464,35 +467,64 @@ def reorder_loops(outer, inner, routine):
     #List loops with the outer dimension
     loops = [l for l in FindNodes(Loop).visit(routine.body) if l.variable == outer.index]
 
-    loop_map = {}
-    for loop in loops:
-        reorder = False
-        for b in loop.body:
+    print(outer.index)
+    print(inner.index)
+    print()
 
-            if isinstance(b, Loop) and b.variable == inner.index:
-                if reorder:
-                    reorder = False
-                    break
-                else:
-                    reorder = True
+    lmap = {}
+    for l in loops:
 
-            elif not (isinstance(b, Comment) or isinstance(b, CommentBlock)):
-                reorder = False
-                break
+        print(l)
+        print(l.body)
 
-        if reorder:
-            loop_map[loop] = loop.body
-            for b in loop.body:
-                if isinstance(b, Loop):
-                    if b.variable == inner.index:
-                        new_inner = loop.clone(body=b.body)
-                        new_outer = b.clone(body=new_inner)
-                        loop_map[b] = new_outer
-                    else:
-                        new_outer = loop.clone(body=b)
-                        loop_map[b] = new_outer
+        in_loops = [l for l in FindNodes(Loop).visit(l.body) if l.variable == inner.index]
 
-    routine.body = Transformer(loop_map).visit(routine.body)
+        in_nodes = [n for n in FindNodes(Node).visit(l.body) if not is_comment(n)]
+
+        if len(in_loops) == 1 and in_loops == [b for b in l.body if not is_comment(b)]:
+            in_in_nodes = [n for n in FindNodes(Node).visit(in_loops[0].body) if not is_comment(n)]
+
+            print('trololololo')
+            in_loop = in_loops[0]
+
+            new_inner = l.clone(body=in_loop.body)
+            new_outer = in_loop.clone(body=new_inner)
+            lmap[l] = new_outer
+
+        print()
+
+    print()
+
+#    loop_map = {}
+#    for loop in loops:
+#        reorder = False
+#        for b in loop.body:
+#
+#            if isinstance(b, Loop) and b.variable == inner.index:
+#                if reorder:
+#                    reorder = False
+#                    break
+#                else:
+#                    reorder = True
+#
+#            elif not is_comment(b):
+#                reorder = False
+#                break
+#
+#
+#        if reorder:
+#            loop_map[loop] = loop.body
+#            for b in loop.body:
+#                if isinstance(b, Loop):
+#                    if b.variable == inner.index:
+#                        new_inner = loop.clone(body=b.body)
+#                        new_outer = b.clone(body=new_inner)
+#                        loop_map[b] = new_outer
+#                    else:
+#                        new_outer = loop.clone(body=b)
+#                        loop_map[b] = new_outer
+
+    routine.body = Transformer(lmap).visit(routine.body)
 
 
 def remove_hook(routine):
@@ -1327,16 +1359,17 @@ def hoist_fun(driver):
 
     reorder_arrays(driver, kernels)
 
-    reorder_loops(gdim, vertical, driver)
-    reorder_loops(gdim, horizontal, driver)
-
     merge_loops(horizontal, driver.body)
+
+    reorder_loops(vertical, horizontal, driver)
+
+    reorder_loops(gdim, horizontal, driver)
+    reorder_loops(gdim, vertical, driver)
 
     reorder_loops(vertical2, horizontal, driver)
     reorder_loops(vertical1, horizontal, driver)
-    reorder_loops(vertical1, horizontal, driver)
 
-    merge_loops(horizontal, driver.body)
+#    merge_loops(horizontal, driver.body)
 
     parametrize(driver)
 
