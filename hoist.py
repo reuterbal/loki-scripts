@@ -8,14 +8,16 @@ from loki import Loop, Transformer, CaseInsensitiveDict, as_tuple, SubstituteExp
 from loki import FindVariables, Assignment, DeferredTypeSymbol, DerivedType
 from loki import Quotient, Product, Sum, InlineCall
 from loki import Scalar, Array, Import, VariableDeclaration, BasicType, LoopRange, RangeIndex
-from loki import IntLiteral, Pragma, Node
+from loki import IntLiteral, Pragma, Node, InternalNode
 from loki import FloatLiteral, IntLiteral, LogicLiteral, LiteralList
 from loki import CommentBlock, Comment, Module, Associate, Conditional, Section
 from loki.expression import symbols as sym
 
 def is_comment(node):
-    return isinstance(node, Comment) or isinstance(node, CommentBlock)
+    return isinstance(node, (Comment, CommentBlock))
 
+def is_variable(node):
+    return isinstance(node, (Scalar, Array, DeferredTypeSymbol))
 
 def expression_variables(expression):
     """
@@ -121,8 +123,9 @@ def remove_unused_arguments(driver, kernel):
     #corresponding to unused kernel arguments
     cmap = {}
     for call in calls:
+
         call_arguments = [c for c in call.arguments]
-        for a in call.context.arg_iter(call):
+        for a in call.arg_iter():
             if a[0] in uarguments:
                 call_arguments.remove(a[1])
 
@@ -467,64 +470,51 @@ def reorder_loops(outer, inner, routine):
     #List loops with the outer dimension
     loops = [l for l in FindNodes(Loop).visit(routine.body) if l.variable == outer.index]
 
-    print(outer.index)
-    print(inner.index)
-    print()
-
     lmap = {}
     for l in loops:
 
-        print(l)
-        print(l.body)
+        in_loops = []
+        for b in l.body:
+            if isinstance(b, Loop) and b.variable == inner.index:
+                in_loops += [b]
 
-        in_loops = [l for l in FindNodes(Loop).visit(l.body) if l.variable == inner.index]
+        if not in_loops:
+            continue
 
         in_nodes = [n for n in FindNodes(Node).visit(l.body) if not is_comment(n)]
 
         if len(in_loops) == 1 and in_loops == [b for b in l.body if not is_comment(b)]:
-            in_in_nodes = [n for n in FindNodes(Node).visit(in_loops[0].body) if not is_comment(n)]
 
-            print('trololololo')
-            in_loop = in_loops[0]
-
-            new_inner = l.clone(body=in_loop.body)
-            new_outer = in_loop.clone(body=new_inner)
+            new_inner = l.clone(body=in_loops[0].body)
+            new_outer = in_loops[0].clone(body=new_inner)
             lmap[l] = new_outer
 
-        print()
+        else:
 
-    print()
-
-#    loop_map = {}
-#    for loop in loops:
-#        reorder = False
-#        for b in loop.body:
-#
-#            if isinstance(b, Loop) and b.variable == inner.index:
-#                if reorder:
-#                    reorder = False
-#                    break
-#                else:
-#                    reorder = True
-#
-#            elif not is_comment(b):
-#                reorder = False
-#                break
-#
-#
-#        if reorder:
-#            loop_map[loop] = loop.body
-#            for b in loop.body:
-#                if isinstance(b, Loop):
-#                    if b.variable == inner.index:
-#                        new_inner = loop.clone(body=b.body)
-#                        new_outer = b.clone(body=new_inner)
-#                        loop_map[b] = new_outer
-#                    else:
-#                        new_outer = loop.clone(body=b)
-#                        loop_map[b] = new_outer
+            other = [b for b in l.body if b not in in_loops]
+            
+            for b in other:
+                c = FindVariables().visit(b)
 
     routine.body = Transformer(lmap).visit(routine.body)
+
+
+def list_outer_loops(body_tuple, outer_loops):
+
+    for b in body_tuple:
+        if isinstance(b, Loop):
+            outer_loops += [b]
+        elif isinstance(b, InternalNode):
+            list_outer_loops(b.body, outer_loops)
+            if isinstance(b, Conditional):
+                list_outer_loops(b.else_body, outer_loops)
+
+
+def move_independent_loop_down(loop_dimension, routine):
+
+    outer_loops = []
+
+    list_outer_loops(routine.body.body, outer_loops)
 
 
 def remove_hook(routine):
@@ -659,6 +649,17 @@ def add_seq(routines):
         routine.body.prepend(seq_pragma)
 
 
+def list_outer_pragmas(body_tuple, outer_loops):
+
+    for b in body_tuple:
+        if isinstance(b, Loop) and b.pragma:
+            outer_loops += [b]
+        elif isinstance(b, InternalNode):
+            list_outer_loops(b.body, outer_loops)
+            if isinstance(b, Conditional):
+                list_outer_loops(b.else_body, outer_loops)
+
+
 def add_data(routine):
     '''
     Add data statements to routines
@@ -667,35 +668,29 @@ def add_data(routine):
     ivars = set()
     ovars = set()
 
+    loops = []
+    list_outer_pragmas(routine.body.body, loops)
+
     loops = [l for l in FindNodes(Loop).visit(routine.body) if l.pragma]
 
     loop_vars = set()
-
-    inside_loops = []
     for l in loops:
-
         loop_vars.add(l.variable)
 
-        if l not in inside_loops:
-            inside_loops += [k for k in FindNodes(Loop).visit(l.body) if k.pragma]
 
-    red_loops = [l for l in loops if l not in inside_loops]
-
-    v_names = [v.name for v in routine.variables if v not in loop_vars]
-
-    for l in red_loops:
+    for l in loops:
 
         assignments = FindNodes(Assignment).visit(l.body)
         for a in assignments:
 
-            if a.lhs.name in v_names and not a.lhs.type.parameter and (isinstance(a.lhs, Array) or isinstance(a.lhs.type.dtype, DerivedType)):
+            if (isinstance(a.lhs, Array) or isinstance(a.lhs.type.dtype, DerivedType)) and a.lhs not in loop_vars and not a.lhs.type.parameter:
                 if a.lhs.parent:
                     ovars.add(a.lhs.parent)
                 else:
                     ovars.add(a.lhs.clone(dimensions=None))
 
             for v in FindVariables().visit(a.rhs):
-                if v.name in v_names and not v.type.parameter and (isinstance(v, Array) or isinstance(v.type.dtype, DerivedType)):
+                if (isinstance(v, Array) or isinstance(v.type.dtype, DerivedType)) and v not in loop_vars and not v.type.parameter:
                     if v.parent:
                         ivars.add(v.parent)
                     else:
@@ -703,15 +698,17 @@ def add_data(routine):
 
         calls = FindNodes(CallStatement).visit(l.body)
         for c in calls:
-            for a in c.context.arg_iter(c):
+            for a in c.arg_iter():
 
-                if a[1].name in v_names and not a[1].type.parameter and (isinstance(a[1], Array) or isinstance(a[1].type.dtype, DerivedType)):
+                if is_variable(a[1]):
+                    if (isinstance(a[1], Array) or isinstance(a[1].type.dtype, DerivedType)) and a[1] not in loop_vars and not a[1].type.parameter:
 
-                    if (a[0].type.intent == 'inout' or a[0].type.intent == 'in' or a[0].type.value):
-                        ivars.add(a[1].clone(dimensions=None))
+                        if (a[0].type.intent == 'inout' or a[0].type.intent == 'in' or a[0].type.value):
+                            ivars.add(a[1].clone(dimensions=None))
 
-                    if (a[0].type.intent == 'inout' or a[0].type.intent == 'out'):
-                        ovars.add(a[1].clone(dimensions=None))
+                        if (a[0].type.intent == 'inout' or a[0].type.intent == 'out'):
+                            ovars.add(a[1].clone(dimensions=None))
+
 
     iovars = ivars.intersection(ovars)
     ivars = ivars - iovars
@@ -800,7 +797,7 @@ def reorder_arrays(driver, kernels):
 
             #a[0] is the variable in kernel
             #a[1] is the variable in driver
-            for a in c.context.arg_iter(c):
+            for a in c.arg_iter():
                 if isinstance(a[0], Array) and isinstance(a[1], Array) and a[1].name not in driver_args:
 
                     #If shape length mismatch
@@ -829,7 +826,7 @@ def reorder_arrays(driver, kernels):
                         shuffleargs[a[1].name] = new_index
 
 
-    #List variables in showing up in shuffleargs
+    #List variables showing up in shuffleargs
     dvars = [v for v in driver.variables if v.name in shuffleargs]
 
     #Generate map to new versions with reordered shape and dimensions
@@ -1139,14 +1136,14 @@ def remove_index_arg(driver, kernel, index):
 
             #Find the index variable in driver
             driver_index = None
-            for a in c.context.arg_iter(c):
+            for a in c.arg_iter():
                 if a[0] == index:
                     driver_index = a[1]
                     break
 
             #Loop over the arguments in call and modify the dimensions
             new_args = []
-            for a in c.context.arg_iter(c):
+            for a in c.arg_iter():
 
                 #Check that it is an array in driver and check that name is in imap
                 if isinstance(a[1], Array) and a[1].name in imap:
@@ -1345,7 +1342,7 @@ def hoist_fun(driver):
 
         hoist_loops(driver, kernel, horizontal)
 
-        remove_index_arg(driver, kernel, 'KL')
+#        remove_index_arg(driver, kernel, 'KL')
 
         remove_unused_variables(kernel)
 
@@ -1357,19 +1354,21 @@ def hoist_fun(driver):
 
         kernel = kernel.clone(parent=None)
 
-    reorder_arrays(driver, kernels)
+#    reorder_arrays(driver, kernels)
 
     merge_loops(horizontal, driver.body)
 
-    reorder_loops(vertical, horizontal, driver)
-
-    reorder_loops(gdim, horizontal, driver)
-    reorder_loops(gdim, vertical, driver)
-
-    reorder_loops(vertical2, horizontal, driver)
-    reorder_loops(vertical1, horizontal, driver)
+#    reorder_loops(vertical, horizontal, driver)
+#
+#    reorder_loops(gdim, horizontal, driver)
+#    reorder_loops(gdim, vertical, driver)
+#
+#    reorder_loops(vertical2, horizontal, driver)
+#    reorder_loops(vertical1, horizontal, driver)
 
 #    merge_loops(horizontal, driver.body)
+
+    move_independent_loop_down(horizontal, driver)
 
     parametrize(driver)
 
