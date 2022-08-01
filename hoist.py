@@ -863,18 +863,25 @@ def reorder_arrays(driver, kernels):
 
 
 def reorder_arrays_dim(routine, dimension):
+    '''
+    routine: Subroutine object
+    dimension: RangeIndex object
 
-    calls = FindNodes(CallStatement).visit(routine.body)
+    Reorder array shape so dimension becomes the last
+    '''
 
+
+    #Get the routine variable corresponding to dimension size
     size = routine.variable_map[dimension.size]
 
+    #Create a list of local arrays that are not arguments and have size in their shape
     local_arrays = []
-
     for v in routine.variables:
         if v not in routine.arguments:
             if isinstance(v, Array) and size in v.shape:
                 local_arrays += [v]
 
+    #Create a dict matching array name to index of size in shape
     l_arrays = {}
     for a in local_arrays:
 
@@ -888,13 +895,15 @@ def reorder_arrays_dim(routine, dimension):
             else:
                 j += 1
 
-    for call in calls:
+    #Remove any variables where size dimension is passed to subroutines
+    for call in FindNodes(CallStatement).visit(routine.body):
         for a in call.arguments:
             if is_variable(a) and a.name in l_arrays:
                 for i in l_arrays[a.name]:
                     if isinstance(a.dimensions[i], RangeIndex):
                         del l_arrays[a.name]
 
+    #Generate map to transform routine spec
     spec_map = {}
     for v in FindVariables().visit(routine.spec):
         if v.name in l_arrays:
@@ -906,8 +915,10 @@ def reorder_arrays_dim(routine, dimension):
 
             spec_map[v] = v.clone(dimensions = new_dims, type = new_type)
 
+    #Transform routine spec
     routine.spec = SubstituteExpressions(spec_map).visit(routine.spec)
 
+    #Generate map for routine body
     body_map = {}
     for v in FindVariables(unique=False).visit(routine.body):
         if v.name in l_arrays:
@@ -917,6 +928,7 @@ def reorder_arrays_dim(routine, dimension):
 
             body_map[v] = v.clone(dimensions = new_dims)
 
+    #Transform routine body
     routine.body = SubstituteExpressions(body_map).visit(routine.body)
 
 
