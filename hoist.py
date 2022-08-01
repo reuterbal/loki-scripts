@@ -8,7 +8,7 @@ from loki import Loop, Transformer, CaseInsensitiveDict, as_tuple, SubstituteExp
 from loki import FindVariables, Assignment, DeferredTypeSymbol, DerivedType
 from loki import Quotient, Product, Sum, InlineCall
 from loki import Scalar, Array, Import, VariableDeclaration, BasicType, LoopRange, RangeIndex
-from loki import IntLiteral, Pragma, Node, InternalNode
+from loki import IntLiteral, Pragma, Node, InternalNode, Intrinsic
 from loki import FloatLiteral, IntLiteral, LogicLiteral, LiteralList
 from loki import CommentBlock, Comment, Module, Associate, Conditional, Section
 from loki.expression import symbols as sym
@@ -16,8 +16,35 @@ from loki.expression import symbols as sym
 def is_comment(node):
     return isinstance(node, (Comment, CommentBlock))
 
+
 def is_variable(node):
     return isinstance(node, (Scalar, Array, DeferredTypeSymbol))
+
+
+def get_routine_range(dimension, routine):
+    '''
+    routine: Subroutine object
+    dimension: RangeIndex object
+
+    Get routine variables and routine LoopRange
+    '''
+
+    rindex = routine.variable_map[dimension.index]
+
+    if dimension.bounds[0].isnumeric():
+        rstart = IntLiteral(dimension.bounds[0])
+    else:
+        rstart = routine.variable_map[dimension.bounds[0]]
+
+    if dimension.bounds[1].isnumeric():
+        rend = IntLiteral(dimension.bounds[1])
+    else:
+        rend = routine.variable_map[dimension.bounds[1]]
+
+    rRange = LoopRange((rstart, rend))
+
+    return rindex, rRange
+
 
 def expression_variables(expression):
     """
@@ -458,48 +485,13 @@ def merge_loops(dimension, routine):
     routine.body = Transformer(call_map).visit(routine.body)
 
 
-def reorder_loops(outer, inner, routine):
-    """
-    outer: Dimension object
-    inner: Dimension object
-    routine: Subroutine object
-
-    Switch order of outer and inner loops
-    """
-
-    #List loops with the outer dimension
-    loops = [l for l in FindNodes(Loop).visit(routine.body) if l.variable == outer.index]
-
-    lmap = {}
-    for l in loops:
-
-        in_loops = []
-        for b in l.body:
-            if isinstance(b, Loop) and b.variable == inner.index:
-                in_loops += [b]
-
-        if not in_loops:
-            continue
-
-        in_nodes = [n for n in FindNodes(Node).visit(l.body) if not is_comment(n)]
-
-        if len(in_loops) == 1 and in_loops == [b for b in l.body if not is_comment(b)]:
-
-            new_inner = l.clone(body=in_loops[0].body)
-            new_outer = in_loops[0].clone(body=new_inner)
-            lmap[l] = new_outer
-
-        else:
-
-            other = [b for b in l.body if b not in in_loops]
-            
-            for b in other:
-                c = FindVariables().visit(b)
-
-    routine.body = Transformer(lmap).visit(routine.body)
-
-
 def list_outer_loops(body_tuple, outer_loops):
+    '''
+    Recurse through body tuples and return a list of outer loops
+
+    body_tuple: tuple of nodes
+    outer_loops: list to add loops to
+    '''
 
     for b in body_tuple:
         if isinstance(b, Loop):
@@ -510,11 +502,27 @@ def list_outer_loops(body_tuple, outer_loops):
                 list_outer_loops(b.else_body, outer_loops)
 
 
-def move_independent_loop_down(loop_dimension, routine):
+def move_independent_loop_out(indydim, routine):
 
-    outer_loops = []
+    loops = []
 
-    list_outer_loops(routine.body.body, outer_loops)
+    list_outer_loops(routine.body.body, loops)
+
+    loops = [l for l in loops if l.variable != indydim.index]
+
+    rindex, rRange = get_routine_range(indydim, routine)
+
+    loop_map = {}
+    for l in loops:
+
+        bodymap = {il: il.body for il in FindNodes(Loop).visit(l.body) if il.variable == indydim.index}
+
+        if bodymap:
+
+            new_body = l.clone(body = Transformer(bodymap).visit(l.body))
+            loop_map[l] = Loop(rindex, bounds = rRange, body = new_body)
+
+    routine.body = Transformer(loop_map).visit(routine.body)
 
 
 def remove_hook(routine):
@@ -854,6 +862,64 @@ def reorder_arrays(driver, kernels):
     driver.body = SubstituteExpressions(vmap).visit(driver.body)
 
 
+def reorder_arrays_dim(routine, dimension):
+
+    calls = FindNodes(CallStatement).visit(routine.body)
+
+    size = routine.variable_map[dimension.size]
+
+    local_arrays = []
+
+    for v in routine.variables:
+        if v not in routine.arguments:
+            if isinstance(v, Array) and size in v.shape:
+                local_arrays += [v]
+
+    l_arrays = {}
+    for a in local_arrays:
+
+        indices = [i for i,s in enumerate(a.shape) if s == size]
+
+        j = 1
+        for i in reversed(indices):
+            if i != len(a.shape) - j:
+                l_arrays[a.name] = indices
+                break
+            else:
+                j += 1
+
+    for call in calls:
+        for a in call.arguments:
+            if is_variable(a) and a.name in l_arrays:
+                for i in l_arrays[a.name]:
+                    if isinstance(a.dimensions[i], RangeIndex):
+                        del l_arrays[a.name]
+
+    spec_map = {}
+    for v in FindVariables().visit(routine.spec):
+        if v.name in l_arrays:
+            ind = [i for i in range(len(v.shape)) if i not in l_arrays[v.name]]
+            ind += l_arrays[v.name]
+
+            new_type = v.type.clone(shape = reduced_list(v.shape, ind))
+            new_dims = reduced_list(v.dimensions, ind)
+
+            spec_map[v] = v.clone(dimensions = new_dims, type = new_type)
+
+    routine.spec = SubstituteExpressions(spec_map).visit(routine.spec)
+
+    body_map = {}
+    for v in FindVariables(unique=False).visit(routine.body):
+        if v.name in l_arrays:
+            ind = [i for i in range(len(v.shape)) if i not in l_arrays[v.name]]
+            ind += l_arrays[v.name]
+            new_dims = reduced_list(v.dimensions, ind)
+
+            body_map[v] = v.clone(dimensions = new_dims)
+
+    routine.body = SubstituteExpressions(body_map).visit(routine.body)
+
+
 def add_loops(driver, kernel, loop_range):
     """
     driver: Subroutine object
@@ -864,15 +930,13 @@ def add_loops(driver, kernel, loop_range):
     """
 
     #Get the variables from loop_range
-    vindex = driver.variable_map[loop_range.index]
-    vstart = driver.variable_map[loop_range.bounds[0]]
-    vend = driver.variable_map[loop_range.bounds[1]]
+    dindex, dRange = get_routine_range(loop_range, driver)
 
     #Loop over call to kernel and generate map to call inside loop
     call_map = {}
     for call in FindNodes(CallStatement).visit(driver.body):
         if call.name == kernel.name:
-            call_map[call] = Loop(variable=vindex, bounds=LoopRange((vstart,vend)), body=[call])
+            call_map[call] = Loop(variable=dindex, bounds=dRange, body=[call])
 
     driver.body = Transformer(call_map).visit(driver.body)
 
@@ -1342,7 +1406,7 @@ def hoist_fun(driver):
 
         hoist_loops(driver, kernel, horizontal)
 
-#        remove_index_arg(driver, kernel, 'KL')
+        remove_index_arg(driver, kernel, 'KL')
 
         remove_unused_variables(kernel)
 
@@ -1354,21 +1418,12 @@ def hoist_fun(driver):
 
         kernel = kernel.clone(parent=None)
 
-#    reorder_arrays(driver, kernels)
+    reorder_arrays(driver, kernels)
+    reorder_arrays_dim(driver, horizontal)
 
     merge_loops(horizontal, driver.body)
 
-#    reorder_loops(vertical, horizontal, driver)
-#
-#    reorder_loops(gdim, horizontal, driver)
-#    reorder_loops(gdim, vertical, driver)
-#
-#    reorder_loops(vertical2, horizontal, driver)
-#    reorder_loops(vertical1, horizontal, driver)
-
-#    merge_loops(horizontal, driver.body)
-
-    move_independent_loop_down(horizontal, driver)
+    move_independent_loop_out(horizontal, driver)
 
     parametrize(driver)
 
@@ -1381,6 +1436,7 @@ def hoist_fun(driver):
     remove_unused_variables(driver)
 
     mod = mod.clone(contains = Section(body= (driver.clone(contains=None),) + tuple(kernels)))
+    mod.contains.prepend(Intrinsic('CONTAINS'))
 
     return mod
 
