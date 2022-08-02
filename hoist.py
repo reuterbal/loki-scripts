@@ -2,6 +2,7 @@
 
 from sys import exit, argv
 from pathlib import Path
+from time import time
 
 from loki import FP, Sourcefile, Dimension, Subroutine, FindNodes, FindScopes, flatten, CallStatement
 from loki import Loop, Transformer, CaseInsensitiveDict, as_tuple, SubstituteExpressions
@@ -19,6 +20,12 @@ def is_comment(node):
 
 def is_variable(node):
     return isinstance(node, (Scalar, Array, DeferredTypeSymbol))
+
+def get_arguments(routine):
+    return [v for v in routine.variables if v.name.lower() in routine._dummies]
+
+def get_nonarguments(routine):
+    return [v for v in routine.variables if v.name.lower() not in routine._dummies]
 
 
 def get_routine_range(dimension, routine):
@@ -129,19 +136,22 @@ def remove_unused_arguments(driver, kernel):
     Removed unused arguments fro kernel and calls in driver
     """
 
+    kargs = get_arguments(kernel)
+    kvars = kernel.variables
+
     #List arguments and remove those that appear in the argument inits and body
-    uarguments = [a for a in kernel.arguments]
+    uarguments = [a for a in kargs]
     remove_init_args(kernel, uarguments)
     remove_body_vars(kernel, uarguments)
 
     #Map the reverse arguments to their number in reverse
     amap = {}
     for a in reversed(uarguments):
-        amap[a] = kernel.arguments.index(a)
+        amap[a] = kargs.index(a)
 
     #List arguments and variables still not in uarguments
-    new_arguments = [a for a in kernel.arguments if a not in uarguments]
-    new_variables = [v for v in kernel.variables if v not in uarguments]
+    new_arguments = [a for a in kargs if a not in uarguments]
+    new_variables = [v for v in kvars if v not in uarguments]
 
     #List calls to kernel
     calls = [call for call in FindNodes(CallStatement).visit(driver.body) if call.name == kernel.name]
@@ -151,8 +161,9 @@ def remove_unused_arguments(driver, kernel):
     cmap = {}
     for call in calls:
 
-        call_arguments = [c for c in call.arguments]
-        for a in call.arg_iter():
+        cargs = call.arguments
+        call_arguments = list(cargs)
+        for a in zip(kargs, cargs):
             if a[0] in uarguments:
                 call_arguments.remove(a[1])
 
@@ -173,7 +184,7 @@ def remove_unused_variables(routine):
     """
 
     #List routine variables not in arguments
-    uvariables = [v for v in routine.variables if v not in routine.arguments]
+    uvariables = get_nonarguments(routine)
 
     #Remove variables appearing in initializations
     remove_init_args(routine, uvariables)
@@ -409,7 +420,7 @@ def pass_value(routine):
 
     #Make scalar arguments with intent in into value arguments
     amap = {}
-    for a in routine.arguments:
+    for a in get_arguments(routine):
         if isinstance(a, Scalar) and isinstance(a.type.dtype, BasicType) and a.type.intent == 'in':
             new_type = a.type.clone(intent = None, value = True)
             amap[a] = a.clone(type = new_type)
@@ -684,7 +695,7 @@ def add_data(routine):
     loop_vars = set()
     for l in loops:
         loop_vars.add(l.variable)
-
+    end = time()
 
     for l in loops:
 
@@ -706,7 +717,7 @@ def add_data(routine):
 
         calls = FindNodes(CallStatement).visit(l.body)
         for c in calls:
-            for a in c.arg_iter():
+            for a in zip(get_arguments(c.routine), c.arguments):
 
                 if is_variable(a[1]):
                     if (isinstance(a[1], Array) or isinstance(a[1].type.dtype, DerivedType)) and a[1] not in loop_vars and not a[1].type.parameter:
@@ -716,7 +727,6 @@ def add_data(routine):
 
                         if (a[0].type.intent == 'inout' or a[0].type.intent == 'out'):
                             ovars.add(a[1].clone(dimensions=None))
-
 
     iovars = ivars.intersection(ovars)
     ivars = ivars - iovars
@@ -775,6 +785,7 @@ def add_data(routine):
 
     routine.spec.append(data_pragma)
     routine.body.append(end_pragma)
+    end = time()
 
 
 def reorder_arrays(driver, kernels):
@@ -786,7 +797,7 @@ def reorder_arrays(driver, kernels):
     '''
 
     #Get a list of the names of driver arguments
-    driver_args = [a.name for a in driver.arguments]
+    driver_args = [a.name for a in get_arguments(driver)]
 
     #List all calls in driver
     calls = FindNodes(CallStatement).visit(driver.body)
@@ -801,11 +812,13 @@ def reorder_arrays(driver, kernels):
     #Loop over kernels and the calls to the kernel
     for kernel in kcalls:
 
+        kargs = get_arguments(kernel)
+
         for c in kcalls[kernel]:
 
             #a[0] is the variable in kernel
             #a[1] is the variable in driver
-            for a in c.arg_iter():
+            for a in zip(kargs, c.arguments): 
                 if isinstance(a[0], Array) and isinstance(a[1], Array) and a[1].name not in driver_args:
 
                     #If shape length mismatch
@@ -876,10 +889,10 @@ def reorder_arrays_dim(routine, dimension):
 
     #Create a list of local arrays that are not arguments and have size in their shape
     local_arrays = []
-    for v in routine.variables:
-        if v not in routine.arguments:
-            if isinstance(v, Array) and size in v.shape:
-                local_arrays += [v]
+    for v in get_nonarguments(routine):
+        if isinstance(v, Array) and size in v.shape:
+            local_arrays += [v]
+    end = time()
 
     #Create a dict matching array name to index of size in shape
     l_arrays = {}
@@ -900,7 +913,7 @@ def reorder_arrays_dim(routine, dimension):
         for a in call.arguments:
             if is_variable(a) and a.name in l_arrays:
                 for i in l_arrays[a.name]:
-                    if isinstance(a.dimensions[i], RangeIndex):
+                    if not a.dimensions or isinstance(a.dimensions[i], RangeIndex):
                         del l_arrays[a.name]
 
     #Generate map to transform routine spec
@@ -1014,10 +1027,13 @@ def demote_arguments(driver, kernel, dimension):
     and modify the corresponding arguments in call
     """
 
+    kvars = FindVariables(unique=False).visit(kernel.body)
+    kargs = get_arguments(kernel)
+
     amap = {}
     vmap = {}
     arg_index = []
-    for j, a in enumerate(kernel.arguments):
+    for j, a in enumerate(kargs):
 
         if isinstance(a, Array):
 
@@ -1042,7 +1058,7 @@ def demote_arguments(driver, kernel, dimension):
                 amap[a] = a.clone(dimensions=new_shape, type=new_type)
                 arg_index += [j]
 
-                avars = [v for v in FindVariables(unique=False).visit(kernel.body) if v.name == a.name]
+                avars = [v for v in kvars if v.name == a.name]
 
                 #Generate new dimensions based on dims and create a map
                 for v in avars:
@@ -1098,11 +1114,13 @@ def demote_arguments(driver, kernel, dimension):
             new_dims = as_tuple(new_dims) or None
             cmap[a] = a.clone(dimensions = new_dims)
 
-
     #Transform kernel spec and body and driver
     kernel.spec = SubstituteExpressions(amap).visit(kernel.spec)
+
     kernel.body = SubstituteExpressions(vmap).visit(kernel.body)
+
     driver.body = SubstituteExpressions(cmap).visit(driver.body)
+    
 
 
 def demote_variables(routine, dimension):
@@ -1114,9 +1132,9 @@ def demote_variables(routine, dimension):
     """
 
     #List array variables with dimension in shape that are not arguments
-    variables = [v for v in routine.variables if isinstance(v, Array) and
-                 any(d in dimension.size_expressions for d in v.shape) and
-                 v not in routine.arguments]
+    variables = get_nonarguments(routine)
+    variables = [v for v in variables if isinstance(v, Array)]
+    variables = [v for v in variables if any(d in dimension.size_expressions for d in v.shape)]
 
     #Construct maps to the variables to their new versions
     #and keep a dict of indices removed.
@@ -1136,7 +1154,6 @@ def demote_variables(routine, dimension):
         new_type = var.type.clone(shape=new_shape or None)
         new_dims = as_tuple(new_dims) or None
         vmap[var] = var.clone(dimensions=new_dims, type=new_type)
-
 
     #Transform routine spec
     routine.spec = SubstituteExpressions(vmap).visit(routine.spec)
@@ -1166,111 +1183,116 @@ def remove_index_arg(driver, kernel, index):
     Remove the index argument from kernel and remove it from calls in driver.
     '''
 
-    if index in kernel.arguments:
+    #List array variables in kernel
+    variables = [v for v in FindVariables(unique=False).visit(kernel.body) if isinstance(v, Array)]
 
-        #List array variables in kernel
-        variables = [v for v in FindVariables(unique=False).visit(kernel.body) if isinstance(v, Array)]
+    #Map variable names to position of index in dimensions
+    imap = {}
+    for v in variables:
+        if v.dimensions and index in v.dimensions:
+            imap[v.name] = v.dimensions.index(index)
+    end = time()
 
-        #Map variable names to position of index in dimensions
-        imap = {}
-        for v in variables:
-            if v.dimensions and index in v.dimensions:
-                imap[v.name] = v.dimensions.index(index)
+    #Modify the variables kernel
+    vmap = {}
+    bmap = {}
+    for v in kernel.variables:
+        if v.name in imap:
 
-        #Modify the variables kernel
-        vmap = {}
-        bmap = {}
-        for v in kernel.variables:
-            if v.name in imap:
+            new_shape = v.shape[:imap[v.name]] + v.shape[imap[v.name]+1:]
+            new_shape = as_tuple(new_shape) or None
+            new_type = v.type.clone(shape=new_shape)
 
-                new_shape = v.shape[:imap[v.name]] + v.shape[imap[v.name]+1:]
-                new_shape = as_tuple(new_shape) or None
-                new_type = v.type.clone(shape=new_shape)
+            new_dims = v.dimensions[:imap[v.name]] + v.dimensions[imap[v.name]+1:]
+            new_dims = as_tuple(new_dims) or None
 
-                new_dims = v.dimensions[:imap[v.name]] + v.dimensions[imap[v.name]+1:]
-                new_dims = as_tuple(new_dims) or None
+            vmap[v] = v.clone(dimensions = new_dims, type = new_type)
 
-                vmap[v] = v.clone(dimensions = new_dims, type = new_type)
+    #Modify the kernel spec
+    kernel.spec = SubstituteExpressions(vmap).visit(kernel.spec)
 
-        #Modify the kernel spec
-        kernel.spec = SubstituteExpressions(vmap).visit(kernel.spec)
+    #Map variables in body to new dimensions
+    for b in variables:
+        if b.name in imap:
+            new_dims = b.dimensions[:imap[b.name]] + b.dimensions[imap[b.name]+1:]
+            bmap[b] = b.clone(dimensions = (as_tuple(new_dims) or None))
 
-        #Map variables in body to new dimensions
-        for b in variables:
-            if b.name in imap:
-                new_dims = b.dimensions[:imap[b.name]] + b.dimensions[imap[b.name]+1:]
-                bmap[b] = b.clone(dimensions = (as_tuple(new_dims) or None))
+    #Transform body variables
+    kernel.body = SubstituteExpressions(bmap).visit(kernel.body)
 
-        #Transform body variables
-        kernel.body = SubstituteExpressions(bmap).visit(kernel.body)
+    #List calls to kernel
+    calls = [c for c in FindNodes(CallStatement).visit(driver.body) if c.name == kernel.name]
 
-        #List calls to kernel
-        calls = [c for c in FindNodes(CallStatement).visit(driver.body) if c.name == kernel.name]
+    kargs = get_arguments(kernel)
 
-        cmap = {}
-        for c in calls:
+    cmap = {}
+    for c in calls:
 
-            #Find the index variable in driver
-            driver_index = None
-            for a in c.arg_iter():
-                if a[0] == index:
-                    driver_index = a[1]
-                    break
+        #Get call arguments
+        cargs = c.arguments
 
-            #Loop over the arguments in call and modify the dimensions
-            new_args = []
-            for a in c.arg_iter():
+        #Find the index variable in driver
+        driver_index = None
+        for a in zip(kargs, cargs):
+            if a[0] == index:
+                driver_index = a[1]
+                break
 
-                #Check that it is an array in driver and check that name is in imap
-                if isinstance(a[1], Array) and a[1].name in imap:
+        #Loop over the arguments in call and modify the dimensions
+        new_args = []
+        for a in zip(kargs, cargs):
 
-                    i=0
-                    new_dims = []
-                    if a[1].dimensions:
-                        #Loop over dimensions in driver and
-                        #find the index in driver that corresponds to the index in kernel
-                        #by counting RangeIndex dimensions.
-                        for d in a[1].dimensions:
-                            if isinstance(d, RangeIndex):
-                                if i == imap[a[1].name]:
-                                    new_dims += [driver_index]
-                                else:
-                                    new_dims += [d]
-                                i += 1
-                            else:
-                                new_dims += [d]
-                    else:
-                        #If no dimensions, insert shape as dimensions except index
-                        for i,d in enumerate(a[1].shape):
+            #Check that it is an array in driver and check that name is in imap
+            if isinstance(a[1], Array) and a[1].name in imap:
+
+                i=0
+                new_dims = []
+                if a[1].dimensions:
+                    #Loop over dimensions in driver and
+                    #find the index in driver that corresponds to the index in kernel
+                    #by counting RangeIndex dimensions.
+                    for d in a[1].dimensions:
+                        if isinstance(d, RangeIndex):
                             if i == imap[a[1].name]:
                                 new_dims += [driver_index]
                             else:
-                                if isinstance(d, RangeIndex):
-                                    new_dims += [d]
-                                else:
-                                    new_dims += [RangeIndex((IntLiteral(1), d))]
+                                new_dims += [d]
+                            i += 1
+                        else:
+                            new_dims += [d]
+                else:
+                    #If no dimensions, insert shape as dimensions except index
+                    for i,d in enumerate(a[1].shape):
+                        if i == imap[a[1].name]:
+                            new_dims += [driver_index]
+                        else:
+                            if isinstance(d, RangeIndex):
+                                new_dims += [d]
+                            else:
+                                new_dims += [RangeIndex((IntLiteral(1), d))]
 
-                    new_dims = as_tuple(new_dims) or None
-                    new_arg  = a[1].clone(dimensions = new_dims)
-                    new_args += [new_arg]
+                new_dims = as_tuple(new_dims) or None
+                new_arg  = a[1].clone(dimensions = new_dims)
+                new_args += [new_arg]
 
-                elif a[0] != index:
-                    new_args += [a[1]]
+            elif a[0] != index:
+                new_args += [a[1]]
 
-            cmap[c] = c.clone(arguments = as_tuple(new_args))
+        cmap[c] = c.clone(arguments = as_tuple(new_args))
 
-        #Transform calls in driver body
-        driver.body = Transformer(cmap).visit(driver.body)
+    #Transform calls in driver body
+    driver.body = Transformer(cmap).visit(driver.body)
 
-        #Remove index from kernel arguments and variables
-        i = kernel.arguments.index(index)
-        kernel.arguments = kernel.arguments[:i] + kernel.arguments[i+1:]
+    #Remove index from kernel arguments and variables
+    i = kargs.index(index)
 
-        i = kernel.variables.index(index)
-        kernel.variables = kernel.variables[:i] + kernel.variables[i+1:]
+    kernel.arguments = kargs[:i] + kargs[i+1:]
 
-    else:
-        raise Exception('Index not in kernel arguments.')
+    kvars = kernel.variables
+
+    i = kvars.index(index)
+
+    kernel.variables = kvars[:i] + kvars[i+1:]
 
 
 
@@ -1283,9 +1305,9 @@ def pass_undefined(driver, kernel):
     '''
 
     #List driver variables that appear in kernel, but are not listed in kernel variables
-    undefined = (d for d in driver.variables if
-                 d.name in (k.name for k in FindVariables(unique=True).visit(kernel.body)) and
-                 d.name not in (k.name for k in kernel.variables))
+    var_names = [v.name for v in kernel.variables]
+    u_names = [v.name for v in FindVariables(unique=True).visit(kernel.body) if v.name not in var_names]
+    undefined = (d for d in driver.variables if d.name in u_names)
 
     #Strip away any dimensions in array variables
     new_arguments = []
@@ -1322,7 +1344,7 @@ def pass_undefined(driver, kernel):
             new_arguments[i] = a.clone(scope=kernel, type=new_type)
 
     #Add the new variables to kernel arguments
-    kernel.arguments = kernel.arguments + tuple(new_arguments)
+    kernel.arguments = tuple(get_arguments(kernel)) + tuple(new_arguments)
 
     #Create a map mapping the variables to their kernel versions
     kmap = {}
@@ -1431,6 +1453,7 @@ def hoist_fun(driver):
         kernel = kernel.clone(parent=None)
 
     reorder_arrays(driver, kernels)
+
     reorder_arrays_dim(driver, horizontal)
 
     merge_loops(horizontal, driver.body)
@@ -1448,6 +1471,7 @@ def hoist_fun(driver):
     remove_unused_variables(driver)
 
     mod = mod.clone(contains = Section(body= (driver.clone(contains=None),) + tuple(kernels)))
+
     mod.contains.prepend(Intrinsic('CONTAINS'))
 
     return mod
@@ -1467,9 +1491,13 @@ def hoist(argv):
     # Driver is the first subroutine in the file
     driver = sauce_file.subroutines[0]
 
+    start = time()
     mod = hoist_fun(driver)
+    end = time()
+    print('Hoist time:', end - start)
 
     new_file = Sourcefile(path=new_name, ir = Section(body = mod))
+
     new_file.write()
 
 
