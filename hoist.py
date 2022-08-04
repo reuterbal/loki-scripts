@@ -12,6 +12,7 @@ from loki import Scalar, Array, Import, VariableDeclaration, BasicType, LoopRang
 from loki import IntLiteral, Pragma, Node, InternalNode, Intrinsic
 from loki import FloatLiteral, IntLiteral, LogicLiteral, LiteralList
 from loki import CommentBlock, Comment, Module, Associate, Conditional, Section
+from loki import ir
 from loki.expression import symbols as sym
 
 def is_comment(node):
@@ -21,20 +22,6 @@ def is_comment(node):
 def is_variable(node):
     return isinstance(node, (Scalar, Array, DeferredTypeSymbol))
 
-def get_arguments(routine):
-
-    argx = [None]*len(routine._dummies)
-    j = 0
-    for s in routine.symbols:
-        for i, d in enumerate(routine._dummies):
-            if s.name.lower() == d:
-                argx[i] = s
-                j += 1
-        if j == len(routine._dummies):
-            break
-
-    return argx
-#    return [v for v in routine.symbols if v.name.lower() in routine._dummies]
 
 def get_nonarguments(routine):
     return [v for v in routine.variables if v.name.lower() not in routine._dummies]
