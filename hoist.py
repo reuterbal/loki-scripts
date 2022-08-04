@@ -22,7 +22,19 @@ def is_variable(node):
     return isinstance(node, (Scalar, Array, DeferredTypeSymbol))
 
 def get_arguments(routine):
-    return [v for v in routine.variables if v.name.lower() in routine._dummies]
+
+    argx = [None]*len(routine._dummies)
+    j = 0
+    for s in routine.symbols:
+        for i, d in enumerate(routine._dummies):
+            if s.name.lower() == d:
+                argx[i] = s
+                j += 1
+        if j == len(routine._dummies):
+            break
+
+    return argx
+#    return [v for v in routine.symbols if v.name.lower() in routine._dummies]
 
 def get_nonarguments(routine):
     return [v for v in routine.variables if v.name.lower() not in routine._dummies]
@@ -136,7 +148,7 @@ def remove_unused_arguments(driver, kernel):
     Removed unused arguments fro kernel and calls in driver
     """
 
-    kargs = get_arguments(kernel)
+    kargs = kernel.arguments
     kvars = kernel.variables
 
     #List arguments and remove those that appear in the argument inits and body
@@ -162,7 +174,7 @@ def remove_unused_arguments(driver, kernel):
     for call in calls:
 
         cargs = call.arguments
-        call_arguments = list(cargs)
+        call_arguments = list(call.arguments)
         for a in zip(kargs, cargs):
             if a[0] in uarguments:
                 call_arguments.remove(a[1])
@@ -420,7 +432,7 @@ def pass_value(routine):
 
     #Make scalar arguments with intent in into value arguments
     amap = {}
-    for a in get_arguments(routine):
+    for a in routine.arguments:
         if isinstance(a, Scalar) and isinstance(a.type.dtype, BasicType) and a.type.intent == 'in':
             new_type = a.type.clone(intent = None, value = True)
             amap[a] = a.clone(type = new_type)
@@ -717,7 +729,7 @@ def add_data(routine):
 
         calls = FindNodes(CallStatement).visit(l.body)
         for c in calls:
-            for a in zip(get_arguments(c.routine), c.arguments):
+            for a in c.arg_iter():
 
                 if is_variable(a[1]):
                     if (isinstance(a[1], Array) or isinstance(a[1].type.dtype, DerivedType)) and a[1] not in loop_vars and not a[1].type.parameter:
@@ -797,7 +809,7 @@ def reorder_arrays(driver, kernels):
     '''
 
     #Get a list of the names of driver arguments
-    driver_args = [a.name for a in get_arguments(driver)]
+    driver_args = [a.name for a in driver.arguments]
 
     #List all calls in driver
     calls = FindNodes(CallStatement).visit(driver.body)
@@ -812,13 +824,11 @@ def reorder_arrays(driver, kernels):
     #Loop over kernels and the calls to the kernel
     for kernel in kcalls:
 
-        kargs = get_arguments(kernel)
-
         for c in kcalls[kernel]:
 
             #a[0] is the variable in kernel
             #a[1] is the variable in driver
-            for a in zip(kargs, c.arguments): 
+            for a in c.arg_iter():
                 if isinstance(a[0], Array) and isinstance(a[1], Array) and a[1].name not in driver_args:
 
                     #If shape length mismatch
@@ -1028,12 +1038,11 @@ def demote_arguments(driver, kernel, dimension):
     """
 
     kvars = FindVariables(unique=False).visit(kernel.body)
-    kargs = get_arguments(kernel)
 
     amap = {}
     vmap = {}
     arg_index = []
-    for j, a in enumerate(kargs):
+    for j, a in enumerate(kernel.arguments):
 
         if isinstance(a, Array):
 
@@ -1223,7 +1232,7 @@ def remove_index_arg(driver, kernel, index):
     #List calls to kernel
     calls = [c for c in FindNodes(CallStatement).visit(driver.body) if c.name == kernel.name]
 
-    kargs = get_arguments(kernel)
+    kargs = kernel.arguments
 
     cmap = {}
     for c in calls:
@@ -1344,7 +1353,7 @@ def pass_undefined(driver, kernel):
             new_arguments[i] = a.clone(scope=kernel, type=new_type)
 
     #Add the new variables to kernel arguments
-    kernel.arguments = tuple(get_arguments(kernel)) + tuple(new_arguments)
+    kernel.arguments = kernel.arguments + tuple(new_arguments)
 
     #Create a map mapping the variables to their kernel versions
     kmap = {}
@@ -1425,6 +1434,7 @@ def hoist_fun(driver):
 
     remove_associate(driver)
 
+    dargs = driver.arguments
     for kernel in kernels:
 
         #Attach kernel source to driver call
