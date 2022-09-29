@@ -1453,8 +1453,6 @@ def hoist_fun(driver):
 
     reorder_arrays_dim(driver, horizontal)
 
-    merge_loops(horizontal, driver.body)
-
     move_independent_loop_out(horizontal, driver)
 
     parametrize(driver)
@@ -1486,7 +1484,7 @@ def hoist(argv):
     sauce_file = Sourcefile.from_file(original_name)
 
     # Driver is the first subroutine in the file
-    driver = sauce_file.subroutines[0]
+    driver = sauce_file.modules[0].subroutines[0]
 
     start = time()
     mod = hoist_fun(driver)
