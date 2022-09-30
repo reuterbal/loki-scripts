@@ -394,20 +394,33 @@ def remove_associate(routine):
     """
 
     associate_map = {}
-    for n in routine.body.body:
-        if isinstance(n, Associate):
 
-            variables = FindVariables(unique=False).visit(n.body)
-            inv = {v.name: k for k, v in n.association_map.items()}
+    associates = FindNodes(Associate).visit(routine.body)
 
-            vmap = {}
-            for v in variables:
-                if v.name in inv:
-                    vmap[v] = v.clone(name=inv[v.name].name, scope=routine)
+    for a in associates:
 
-            associate_map[n] = SubstituteExpressions(vmap).visit(n.body)
+        variables = FindVariables(unique=False).visit(a.body)
+        inv = {v.name: k for k, v in a.association_map.items()}
 
-    routine.body = Transformer(associate_map).visit(routine.body)
+        vmap = {}
+        for v in variables:
+            if v.name in inv:
+                vmap[v] = v.clone(name=inv[v.name].name, scope=routine)
+
+        associate_map[a] = SubstituteExpressions(vmap).visit(a.body)
+
+    new_contains = None
+    if routine.contains:
+
+        new_body = []
+        for c in routine.contains.body:
+            if isinstance(c, Subroutine):
+                new_body += [remove_associate(c)]
+            else:
+                new_body += [c]
+        new_contains = routine.contains.clone(body = tuple(new_body))
+
+    return routine.clone(body = Transformer(associate_map).visit(routine.body), contains = new_contains)
 
 
 def pass_value(routine):
@@ -425,6 +438,54 @@ def pass_value(routine):
             amap[a] = a.clone(type = new_type)
 
     routine.spec = Transformer(amap).visit(routine.spec)
+
+def split_loop(loop):
+    '''
+    loop: Loop object
+
+    Split loop if possible
+    '''
+
+    loop_map = {}
+    for b in loop.body:
+        if isinstance(b, Loop):
+            loop_map[b] = split_loop(b)
+
+    new_loop = loop.clone(body = Transformer(loop_map).visit(loop.body))
+
+    print(loop)
+    for b in new_loop.body:
+        changed = []
+        if isinstance(b, Assignment):
+            changed += [b.lhs]
+        elif isinstance(b, CallStatement): 
+            for a in b.arg_iter():
+                if (a[0].type.intent == 'out' or a[0].type.intent == 'inout'):
+                    changed += [a[1]]
+        print(b)
+        print(changed)
+        print()
+        
+
+    return new_loop
+
+
+def split_loops(routine):
+    """
+    routine: Subroutine object
+
+    Find loops in routine body and split them if possible.
+    """
+    
+    outer_loops = list_outer_loops(routine.body.body)
+
+    loop_map = {}
+    for loop in outer_loops:
+        loop_map[loop] = split_loop(loop)
+
+    new_routine = routine.clone(body = Transformer(loop_map).visit(routine.body))
+
+    return new_routine
 
 
 def find_next(loop, nodes):
@@ -495,28 +556,36 @@ def merge_loops(dimension, routine):
     routine.body = Transformer(call_map).visit(routine.body)
 
 
-def list_outer_loops(body_tuple, outer_loops):
+def list_outer_loops(body_tuple):
     '''
-    Recurse through body tuples and return a list of outer loops
-
     body_tuple: tuple of nodes
     outer_loops: list to add loops to
+
+    Recurse through body tuples and return a list of outer loops
     '''
 
+
+    outer_loops = []
     for b in body_tuple:
         if isinstance(b, Loop):
             outer_loops += [b]
         elif isinstance(b, InternalNode):
-            list_outer_loops(b.body, outer_loops)
+            outer_loops += list_outer_loops(b.body)
             if isinstance(b, Conditional):
-                list_outer_loops(b.else_body, outer_loops)
+                outer_loops += list_outer_loops(b.else_body)
+
+    return outer_loops
 
 
 def move_independent_loop_out(indydim, routine):
+    '''
+    indydim: RangeIndex object
+    routine: Subroutine object
 
-    loops = []
+    Find any loops with index indydim andmake them the outer loop if they are nested.
+    '''
 
-    list_outer_loops(routine.body.body, loops)
+    loops = list_outer_loops(routine.body.body)
 
     loops = [l for l in loops if l.variable != indydim.index]
 
@@ -667,17 +736,6 @@ def add_seq(routines):
         routine.body.prepend(seq_pragma)
 
 
-def list_outer_pragmas(body_tuple, outer_loops):
-
-    for b in body_tuple:
-        if isinstance(b, Loop) and b.pragma:
-            outer_loops += [b]
-        elif isinstance(b, InternalNode):
-            list_outer_loops(b.body, outer_loops)
-            if isinstance(b, Conditional):
-                list_outer_loops(b.else_body, outer_loops)
-
-
 def add_data(routine):
     '''
     Add data statements to routines
@@ -685,9 +743,6 @@ def add_data(routine):
 
     ivars = set()
     ovars = set()
-
-    loops = []
-    list_outer_pragmas(routine.body.body, loops)
 
     loops = [l for l in FindNodes(Loop).visit(routine.body) if l.pragma]
 
@@ -1419,7 +1474,7 @@ def hoist_fun(driver):
 
     mod = make_module(driver)
 
-    remove_associate(driver)
+    driver = remove_associate(driver)
 
     dargs = driver.arguments
     for kernel in kernels:
@@ -1428,8 +1483,6 @@ def hoist_fun(driver):
         driver.enrich_calls(kernel)
 
         remove_hook(kernel)
-
-        remove_associate(kernel)
 
         pass_undefined(driver, kernel)
 
