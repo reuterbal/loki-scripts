@@ -393,8 +393,12 @@ def remove_associate(routine):
     then replace the associate node with the associate body.
     """
 
-    associate_map = {}
+    if routine.contains:
+        for c in routine.contains.body:
+            if isinstance(c, Subroutine):
+                remove_associate(c)
 
+    associate_map = {}
     associates = FindNodes(Associate).visit(routine.body)
 
     for a in associates:
@@ -405,22 +409,15 @@ def remove_associate(routine):
         vmap = {}
         for v in variables:
             if v.name in inv:
-                vmap[v] = v.clone(name=inv[v.name].name, scope=routine)
+                if isinstance(v, Array):
+                    vmap[v] = inv[v.name].clone(dimensions=v.dimensions)
+                else:
+                    vmap[v] = inv[v.name].clone()
 
         associate_map[a] = SubstituteExpressions(vmap).visit(a.body)
 
-    new_contains = None
-    if routine.contains:
 
-        new_body = []
-        for c in routine.contains.body:
-            if isinstance(c, Subroutine):
-                new_body += [remove_associate(c)]
-            else:
-                new_body += [c]
-        new_contains = routine.contains.clone(body = tuple(new_body))
-
-    return routine.clone(body = Transformer(associate_map).visit(routine.body), contains = new_contains)
+    routine.body = Transformer(associate_map).visit(routine.body)
 
 
 def pass_value(routine):
@@ -453,7 +450,6 @@ def split_loop(loop):
 
     new_loop = loop.clone(body = Transformer(loop_map).visit(loop.body))
 
-    print(loop)
     for b in new_loop.body:
         changed = []
         if isinstance(b, Assignment):
@@ -462,9 +458,6 @@ def split_loop(loop):
             for a in b.arg_iter():
                 if (a[0].type.intent == 'out' or a[0].type.intent == 'inout'):
                     changed += [a[1]]
-        print(b)
-        print(changed)
-        print()
         
 
     return new_loop
@@ -850,16 +843,17 @@ def reorder_arrays(driver, kernels):
     Reorder array dimensions in kernels so they match dimensions in driver.
     '''
 
-    #Get a list of the names of driver arguments
-    driver_args = [a.name for a in driver.arguments]
 
     #List all calls in driver
     calls = FindNodes(CallStatement).visit(driver.body)
 
+    #Get a list of the names of driver arguments
+    driver_args = [a.name for a in driver.arguments]
+
     #Map calls to kernels
     kcalls = {}
     for kernel in kernels:
-        kcalls[kernel] = [call for call in calls if call.name == kernel.name]
+        kcalls[kernel] = [call for call in calls if call.routine == kernel]
 
     shuffleargs = {}
 
@@ -867,7 +861,6 @@ def reorder_arrays(driver, kernels):
     for kernel in kcalls:
 
         for c in kcalls[kernel]:
-
             #a[0] is the variable in kernel
             #a[1] is the variable in driver
             for a in c.arg_iter():
@@ -897,7 +890,6 @@ def reorder_arrays(driver, kernels):
 
                         #Store new_index and variable
                         shuffleargs[a[1].name] = new_index
-
 
     #List variables showing up in shuffleargs
     dvars = [v for v in driver.variables if v.name in shuffleargs]
@@ -1242,7 +1234,6 @@ def remove_index_arg(driver, kernel, index):
     for v in variables:
         if v.dimensions and index in v.dimensions:
             imap[v.name] = v.dimensions.index(index)
-    end = time()
 
     #Modify the variables kernel
     vmap = {}
@@ -1344,7 +1335,6 @@ def remove_index_arg(driver, kernel, index):
     i = kvars.index(index)
 
     kernel.variables = kvars[:i] + kvars[i+1:]
-
 
 
 def pass_undefined(driver, kernel):
@@ -1469,18 +1459,16 @@ def hoist_fun(driver):
     vertical1 = Dimension(name='vertical1', size='klev+1', index='jlev1', bounds=('0', 'klev'))
     vertical2 = Dimension(name='vertical2', size='klev+1', index='jlev2', bounds=('0', 'klev'))
 
-    #Kernel is the subroutine contained in driver in this case.
-    kernels = driver.members
-
+    #Create a module object
     mod = make_module(driver)
 
-    driver = remove_associate(driver)
+    #Remove associate statements from source code
+    remove_associate(driver)
 
-    dargs = driver.arguments
+    #Kernels are the subroutines contained in driver in this case.
+    kernels = list(driver.members)
+
     for kernel in kernels:
-
-        #Attach kernel source to driver call
-        driver.enrich_calls(kernel)
 
         remove_hook(kernel)
 
@@ -1520,8 +1508,6 @@ def hoist_fun(driver):
 
     mod = mod.clone(contains = Section(body= (driver.clone(contains=None),) + tuple(kernels)))
 
-    mod.contains.prepend(Intrinsic('CONTAINS'))
-
     return mod
 
 
@@ -1537,7 +1523,7 @@ def hoist(argv):
     sauce_file = Sourcefile.from_file(original_name)
 
     # Driver is the first subroutine in the file
-    driver = sauce_file.modules[0].subroutines[0]
+    driver = sauce_file.subroutines[0]
 
     start = time()
     mod = hoist_fun(driver)
