@@ -18,16 +18,15 @@ from sys import exit, argv
 from pathlib import Path
 from time import time
 
-from loki import FP, Sourcefile, Dimension, Subroutine, FindNodes, FindScopes, flatten, CallStatement
-from loki import Loop, Transformer, CaseInsensitiveDict, as_tuple, SubstituteExpressions
+from loki import Sourcefile, Dimension, Subroutine, FindNodes, CallStatement
+from loki import Loop, Transformer, as_tuple, SubstituteExpressions
 from loki import FindVariables, Assignment, DeferredTypeSymbol, DerivedType
 from loki import Quotient, Product, Sum, InlineCall
 from loki import Scalar, Array, Import, VariableDeclaration, BasicType, LoopRange, RangeIndex
-from loki import IntLiteral, Pragma, Node, InternalNode, Intrinsic
+from loki import Pragma, Node, InternalNode
 from loki import FloatLiteral, IntLiteral, LogicLiteral, LiteralList
 from loki import CommentBlock, Comment, Module, Associate, Conditional, Section
-from loki import ir
-from loki.expression import symbols as sym
+
 
 def is_comment(node):
     return isinstance(node, (Comment, CommentBlock))
