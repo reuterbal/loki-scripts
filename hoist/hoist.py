@@ -1502,7 +1502,7 @@ def hoist_fun(driver):
 
         parametrize(kernel)
 
-        kernel = kernel.clone(parent=None)
+        kernel.parent = None
 
     reorder_arrays(driver, kernels)
 
