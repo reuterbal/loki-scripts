@@ -28,6 +28,134 @@ from loki import FloatLiteral, IntLiteral, LogicLiteral, LiteralList
 from loki import CommentBlock, Comment, Module, Associate, Conditional, Section
 
 
+def insert_routine_body(driver):
+    '''
+    driver: Subroutine object
+
+    Replace calls to included routines with routine bodies
+    '''
+
+    minus_one = Product((-1, IntLiteral(1)))
+
+    #List call objects and variable names in driver
+    calls = FindNodes(CallStatement).visit(driver.body)
+    d_names = [v.name for v in driver.variables]
+
+    #Create ampty call map and kernel variable name list
+    call_map = {}
+    k_names = []
+
+    #Loop over member subroutines
+    for kernel in driver.members:
+
+        #Make a set of kernel variables that are not arguments and 
+        #not duplicates of driver variables
+        kset = set(get_nonarguments(kernel)) - set(driver.variables)
+
+        #Add names to l;ist of kernel variable names
+        k_names += [v.name for v in kset]
+
+        #Have to check for kernel variables with the same name as driver variables
+        #Create sets of variables to add and remove create a map from old to new names
+        pset = set()
+        mset = set()
+        name_map = {}
+
+        #Loop over variables in kernel set and check if name exists in driver
+        for v in kset:
+            if v.name in d_names:
+
+                #Add an X at the end of name until the name is unique
+                new_name = v.name + 'X'
+                while (new_name in d_names or new_name in k_names):
+                    new_name += 'X'
+
+                #Create variable with new name and organize set and map
+                mset.add(v)
+                pset.add(v.clone(name = new_name))
+                k_names += [new_name]
+                name_map[v.name] = new_name
+
+        kset = kset - mset
+        kset = kset.union(pset)
+
+        #Check if any names must change
+        kvar_map = {}
+        if name_map:
+            #Map variables to variables with new names
+            for v in FindVariables(unique=False).visit(kernel.body):
+                if v.name in name_map:
+                    kvar_map[v] = v.clone(name = name_map[v.name])
+
+        temp_body = SubstituteExpressions(kvar_map).visit(kernel.body)
+
+        xvars = FindVariables().visit(temp_body)
+
+        #Loop over all calls and check if they call the kernel
+        for call in calls:
+            if call.routine == kernel:
+
+                #Create map from kernel dummy name to actual argument
+                amap = {}
+                for a in call.arg_iter():
+                    amap[a[0].name] = a[1]
+
+                #List kernel dummy variables
+                variables = [v for v in FindVariables(unique=False).visit(temp_body) if v.name in amap]
+
+                vmap = {}
+                for v in variables:
+                    #If actual argument not an array, just use it directly
+                    if not isinstance(amap[v.name], Array):
+                        vmap[v] = amap[v.name]
+                    #If the shapes are the same, just use actual argument with kernel dimensions
+                    elif isinstance(v, Array) and len(v.shape) == len(amap[v.name].shape):
+                        vmap[v] = amap[v.name].clone(dimensions = v.dimensions)
+                    else:
+                        #Else we have to be careful
+                        new_dims = []
+                        ranges = sum(1 for d in amap[v.name].dimensions if isinstance(d, RangeIndex))
+
+                        #If shape of dummy matches the number of ranges, match dimensions to ranges
+                        if (len(v.shape) == ranges):
+
+                            #Loop over dimensions of actual argument
+                            j = 0
+                            for a in amap[v.name].dimensions:
+                                #If dimension is a range
+                                if isinstance(a, RangeIndex):
+                                    #If there's no lower range, just use kernel dimension, else subtract 1
+                                    if not a.lower or (isinstance(a.lower, IntLiteral) and a.lower.value == 1):
+                                        new_dims += [v.dimensions[j]]
+                                    elif isinstance(a.lower, IntLiteral):
+                                        new_dims += [Sum((IntLiteral(value = a.lower.value - 1), v.dimensions[j]))]
+                                    else:
+                                        new_dims += [Sum((a.lower, v.dimensions[j], minus_one))]
+                                    j += 1
+
+                                #else, just add actual argument dimension
+                                else:
+                                    new_dims += [a]
+
+                        #If no ranges, first dimensions are from kernel, the rest are from driver
+                        elif (ranges == 0):
+                            new_dims += list(v.dimensions)
+                            new_dims += list(amap[v.name].dimensions[len(v.shape):])
+
+                        else:
+                            raise Exception('Mismatch in dimensions')
+
+                        vmap[v] = amap[v.name].clone(dimensions = as_tuple(new_dims))
+
+                call_map[call] = SubstituteExpressions(vmap).visit(temp_body)
+
+        driver.variables = as_tuple(list(driver.variables) + list(kset))
+        d_names += k_names
+
+    driver.body = Transformer(call_map).visit(driver.body)
+    driver.contains = None
+
+
 def is_comment(node):
     return isinstance(node, (Comment, CommentBlock))
 
@@ -777,6 +905,9 @@ def add_data(routine):
 
         calls = FindNodes(CallStatement).visit(l.body)
         for c in calls:
+
+            assert c.routine is not BasicType.DEFERRED
+
             for a in c.arg_iter():
 
                 if is_variable(a[1]):
@@ -1478,45 +1609,47 @@ def hoist_fun(driver):
     #Remove associate statements from source code
     remove_associate(driver)
 
+    insert_routine_body(driver)
+
     #Kernels are the subroutines contained in driver in this case.
     kernels = list(driver.members)
 
-    for kernel in kernels:
-
-        remove_hook(kernel)
-
-        pass_undefined(driver, kernel)
-
-        insert_imports(driver, kernel)
-
-        hoist_loops(driver, kernel, horizontal)
-
-        remove_index_arg(driver, kernel, 'KL')
-
-        remove_unused_variables(kernel)
-
-        remove_unused_arguments(driver, kernel)
-
-        pass_value(kernel)
-
-        parametrize(kernel)
-
-        kernel.parent = None
-
+#    for kernel in kernels:
+#
+#        remove_hook(kernel)
+#
+#        pass_undefined(driver, kernel)
+#
+#        insert_imports(driver, kernel)
+#
+#        hoist_loops(driver, kernel, horizontal)
+#
+#        remove_index_arg(driver, kernel, 'KL')
+#
+#        remove_unused_variables(kernel)
+#
+#        remove_unused_arguments(driver, kernel)
+#
+#        pass_value(kernel)
+#
+#        parametrize(kernel)
+#
+#        kernel.parent = None
+#
     reorder_arrays(driver, kernels)
-
-    reorder_arrays_dim(driver, horizontal)
-
+#
+#    reorder_arrays_dim(driver, horizontal)
+#
     move_independent_loop_out(horizontal, driver)
-
+#
     parametrize(driver)
-
-    add_seq(kernels)
-
-    add_acc(driver, vector=horizontal, sequential=vertical)
-
-    add_data(driver)
-
+#
+#    add_seq(kernels)
+#
+#    add_acc(driver, vector=horizontal, sequential=vertical)
+#
+#    add_data(driver)
+#
     remove_unused_variables(driver)
 
     mod = mod.clone(contains = Section(body= (driver.clone(contains=None),) + tuple(kernels)))
