@@ -474,7 +474,7 @@ def parametrize(routine):
     #If all dimensions are set, add to main dictionary
     for c in new_dict:
         if all(new_dict[c]):
-            const_dict[c] = LiteralList(values = new_dict[c])
+            const_dict[c] = LiteralList(values = as_tuple(new_dict[c]))
 
     #List variable declarations and names of constants
     const_names = [c.name for c in const_dict]
@@ -742,14 +742,14 @@ def remove_hook(routine):
     '''
     routine: Subroutine object
 
-    Remove call to dr_hook
+    Remove calls to dr_hook
     '''
 
     none_map = {}
-    for n in routine.body.body:
-        if isinstance(n, Conditional) and n.condition == 'LHOOK':
-            none_map[n] = None
-
+    for c in FindNodes(Conditional).visit(routine.body):
+        if c.condition == 'LHOOK':
+            none_map[c] = None
+        
     routine.body = Transformer(none_map).visit(routine.body)
 
 
@@ -906,18 +906,17 @@ def add_data(routine):
         calls = FindNodes(CallStatement).visit(l.body)
         for c in calls:
 
-            assert c.routine is not BasicType.DEFERRED
+            if c.routine is not BasicType.DEFERRED:
+                for a in c.arg_iter():
 
-            for a in c.arg_iter():
+                    if is_variable(a[1]):
+                        if (isinstance(a[1], Array) or isinstance(a[1].type.dtype, DerivedType)) and a[1] not in loop_vars and not a[1].type.parameter:
 
-                if is_variable(a[1]):
-                    if (isinstance(a[1], Array) or isinstance(a[1].type.dtype, DerivedType)) and a[1] not in loop_vars and not a[1].type.parameter:
+                            if (a[0].type.intent == 'inout' or a[0].type.intent == 'in' or a[0].type.value):
+                                ivars.add(a[1].clone(dimensions=None))
 
-                        if (a[0].type.intent == 'inout' or a[0].type.intent == 'in' or a[0].type.value):
-                            ivars.add(a[1].clone(dimensions=None))
-
-                        if (a[0].type.intent == 'inout' or a[0].type.intent == 'out'):
-                            ovars.add(a[1].clone(dimensions=None))
+                            if (a[0].type.intent == 'inout' or a[0].type.intent == 'out'):
+                                ovars.add(a[1].clone(dimensions=None))
 
     iovars = ivars.intersection(ovars)
     ivars = ivars - iovars
@@ -1614,6 +1613,8 @@ def hoist_fun(driver):
     #Kernels are the subroutines contained in driver in this case.
     kernels = list(driver.members)
 
+    remove_hook(driver)
+
 #    for kernel in kernels:
 #
 #        remove_hook(kernel)
@@ -1636,9 +1637,9 @@ def hoist_fun(driver):
 #
 #        kernel.parent = None
 #
-    reorder_arrays(driver, kernels)
+#    reorder_arrays(driver, kernels)
 #
-#    reorder_arrays_dim(driver, horizontal)
+    reorder_arrays_dim(driver, horizontal)
 #
     move_independent_loop_out(horizontal, driver)
 #
@@ -1646,9 +1647,9 @@ def hoist_fun(driver):
 #
 #    add_seq(kernels)
 #
-#    add_acc(driver, vector=horizontal, sequential=vertical)
+    add_acc(driver, vector=horizontal, sequential=vertical)
 #
-#    add_data(driver)
+    add_data(driver)
 #
     remove_unused_variables(driver)
 
