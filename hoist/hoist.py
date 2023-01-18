@@ -1640,17 +1640,17 @@ def hoist_fun(driver):
 #    reorder_arrays(driver, kernels)
 #
     reorder_arrays_dim(driver, horizontal)
-#
+
     move_independent_loop_out(horizontal, driver)
-#
+
     parametrize(driver)
 #
 #    add_seq(kernels)
 #
     add_acc(driver, vector=horizontal, sequential=vertical)
-#
+
     add_data(driver)
-#
+
     remove_unused_variables(driver)
 
     mod = mod.clone(contains = Section(body= (driver.clone(contains=None),) + tuple(kernels)))
